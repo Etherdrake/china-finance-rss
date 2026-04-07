@@ -37,18 +37,30 @@ CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))  # Cache TTL in seconds (default:
 cache = {}
 
 
-def fetch_json(url, headers=None):
-    """Fetch URL with in-memory cache."""
+def fetch_json(url, headers=None, retries=2, backoff=3.0):
+    """Fetch URL with in-memory cache and retry logic."""
     now = time()
     if url in cache and now - cache[url]['time'] < CACHE_TTL:
         return cache[url]['data']
 
-    req = Request(url, headers=headers or {})
-    with urlopen(req, timeout=10) as resp:
-        data = resp.read().decode('utf-8')
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            req = Request(url, headers=headers or {})
+            with urlopen(req, timeout=10) as resp:
+                data = resp.read().decode('utf-8')
+            cache[url] = {'data': data, 'time': now}
+            return data
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(backoff * (attempt + 1))
 
-    cache[url] = {'data': data, 'time': now}
-    return data
+    # Return stale cache if available, otherwise re-raise
+    if url in cache:
+        sys.stderr.write(f"[WARN] fetch_json({url}) failed after {retries} retries, using stale cache\n")
+        return cache[url]['data']
+    raise last_err
 
 
 def escape_xml(text):
@@ -301,8 +313,17 @@ def main():
     print(f'\nNote: Xueqiu requires Chrome with CDP enabled + a logged-in Xueqiu tab.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
-    server = HTTPServer(('0.0.0.0', PORT), RSSHandler)
-    server.serve_forever()
+    while True:
+        try:
+            server = HTTPServer(('0.0.0.0', PORT), RSSHandler)
+            print(f'[INFO] Server started on 0.0.0.0:{PORT}')
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print('[INFO] Server interrupted, shutting down.')
+            break
+        except Exception as e:
+            sys.stderr.write(f'[ERROR] Server crashed: {e}, restarting in 5s...\n')
+            time.sleep(5)
 
 
 if __name__ == '__main__':
